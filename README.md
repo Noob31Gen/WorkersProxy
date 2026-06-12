@@ -22,6 +22,15 @@ You need the following installed on your computer:
 * Node.js (version 18 or higher is recommended)
 
 ### 2. Project Structure
+
+Clone this repository:
+```bash
+git clone https://github.com/Noob31Gen/WorkersProxy.git
+cd WorkersProxy
+```
+
+or download the zip, extract it and go to the folder where this readme is.
+
 Ensure your project files are arranged as follows:
 * package.json - Contains project scripts and developer tools.
 * wrangler.toml - Configuration file for your Cloudflare Worker.
@@ -33,22 +42,6 @@ Open your terminal in the project directory and run:
 npm install
 ```
 This installs wrangler, the CLI tool used to test and deploy Cloudflare Workers.
-
-### 4. Running Locally
-To test the proxy locally, run:
-```bash
-npm run dev
-```
-By default, this will start a local server, usually at http://localhost:8787.
-
-To test authentication and target fetching locally, you can create a file named `.dev.vars` in the root of the project to set local environment variables:
-```text
-PROXY_USER=myusername
-PROXY_SECRET=mypassword
-```
-Save that file, restart your local server, and you can test authentication.
-
----
 
 ## Deploying to Cloudflare
 
@@ -115,3 +108,24 @@ fetch(`${workerUrl}/?target=${encodeURIComponent(targetUrl)}`, {
 .then(data => console.log(data))
 .catch(error => console.error('Error:', error));
 ```
+
+---
+
+## Integrating into Application Settings
+
+If you are using an application (such as the URL Scanner) that supports pasting a custom proxy URL in its settings, you can pass authentication credentials inline within the URL authority structure.
+
+### Authenticated Proxy URL Format
+Format your custom proxy URL using the inline Basic Authentication syntax:
+
+```text
+https://username:password@your-worker-subdomain.workers.dev/?target=
+```
+
+Be sure to replace:
+* `username` with your `PROXY_USER` value.
+* `password` with your `PROXY_SECRET` value.
+* `your-worker-subdomain.workers.dev` with the actual domain of your deployed Cloudflare Worker.
+
+[Noob31](https://noob31.com)
+
