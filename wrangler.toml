@@ -1,0 +1,11 @@
+name = "workers2"
+main = "src/index.js"
+compatibility_date = "2024-02-08"
+
+# If you want to route this to a specific custom domain you manage on Cloudflare:
+# routes = [
+#   { pattern = "proxy.yourdomain.com/*", zone_name = "yourdomain.com" }
+# ]
+
+[observability]
+enabled = true
