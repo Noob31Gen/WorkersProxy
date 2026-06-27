@@ -13,18 +13,33 @@ async function secureCompare(a, b) {
 
 export default {
     async fetch(request, env) {
-        // 1. CORS Preflight
         const requestOrigin = request.headers.get('Origin') || '*';
 
+        // Helper to return responses with standard CORS headers
+        const corsHeaders = {
+            'Access-Control-Allow-Origin': requestOrigin,
+            'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
+            'Access-Control-Allow-Headers': request.headers.get('Access-Control-Request-Headers') || 'Authorization, Content-Type, X-Proxy-Target, *',
+            'Access-Control-Max-Age': '86400',
+        };
+        if (requestOrigin !== '*') {
+            corsHeaders['Access-Control-Allow-Credentials'] = 'true';
+        }
+
+        const errorResponse = (body, status) => {
+            return new Response(body, {
+                status: status,
+                headers: {
+                    ...corsHeaders,
+                    'Content-Type': 'text/plain'
+                }
+            });
+        };
+
+        // 1. CORS Preflight
         if (request.method === 'OPTIONS') {
             return new Response(null, {
-                headers: {
-                    'Access-Control-Allow-Origin': requestOrigin,
-                    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, PATCH, OPTIONS',
-                    'Access-Control-Allow-Headers': 'Authorization, Content-Type, X-Proxy-Target, *',
-                    'Access-Control-Allow-Credentials': 'true',
-                    'Access-Control-Max-Age': '86400',
-                }
+                headers: corsHeaders
             });
         }
 
@@ -33,7 +48,10 @@ export default {
         if (!authHeader || !authHeader.startsWith('Basic ')) {
             return new Response('Unauthorized', {
                 status: 401,
-                headers: { 'WWW-Authenticate': 'Basic realm="Secure Proxy"' }
+                headers: {
+                    'WWW-Authenticate': 'Basic realm="Secure Proxy"',
+                    ...corsHeaders
+                }
             });
         }
 
@@ -42,28 +60,44 @@ export default {
             const base64Credentials = authHeader.split(' ')[1];
             [user, password] = atob(base64Credentials).split(':');
         } catch (e) {
-            return new Response('Bad Request', { status: 400 });
+            return errorResponse('Bad Request: Invalid credentials format', 400);
         }
 
         const isUserValid = await secureCompare(user, env.PROXY_USER);
         const isPassValid = await secureCompare(password, env.PROXY_SECRET);
         if (!isUserValid || !isPassValid) {
-            return new Response('Forbidden: Invalid credentials', { status: 403 });
+            return errorResponse('Forbidden: Invalid credentials', 403);
         }
 
         const url = new URL(request.url);
 
         // 3. Target URL Extraction
-        const targetUrlStr = url.searchParams.get('target') || request.headers.get('X-Proxy-Target');
+        let targetUrlStr = url.searchParams.get('target') || request.headers.get('X-Proxy-Target');
         if (!targetUrlStr) {
-            return new Response('Bad Request: Missing target', { status: 400 });
+            return errorResponse('Bad Request: Missing target', 400);
+        }
+
+        // Unwrap nested/loopback proxy URLs to prevent loopback request duplication and latency
+        try {
+            let nestedUrl = new URL(targetUrlStr);
+            while (nestedUrl.hostname === url.hostname && nestedUrl.searchParams.has('target')) {
+                const unwrapped = nestedUrl.searchParams.get('target');
+                if (unwrapped) {
+                    targetUrlStr = unwrapped;
+                    nestedUrl = new URL(targetUrlStr);
+                } else {
+                    break;
+                }
+            }
+        } catch (e) {
+            // Keep targetUrlStr as is if parsing fails
         }
 
         let targetUrl;
         try {
             targetUrl = new URL(targetUrlStr);
         } catch (e) {
-            return new Response('Bad Request: Invalid target', { status: 400 });
+            return errorResponse('Bad Request: Invalid target URL', 400);
         }
 
         targetUrl.username = '';
@@ -110,10 +144,9 @@ export default {
 
             const resHeaders = new Headers(response.headers);
 
-            resHeaders.set('Access-Control-Allow-Origin', requestOrigin);
-
-            if (requestOrigin !== '*') {
-                resHeaders.set('Access-Control-Allow-Credentials', 'true');
+            // Copy dynamic CORS headers
+            for (const [key, value] of Object.entries(corsHeaders)) {
+                resHeaders.set(key, value);
             }
 
             resHeaders.set('Access-Control-Expose-Headers', '*');
@@ -121,22 +154,33 @@ export default {
             resHeaders.delete('X-Frame-Options');
             resHeaders.delete('Strict-Transport-Security');
 
+            // Strip encoding/length headers since Cloudflare automatically handles decompression
+            resHeaders.delete('Content-Encoding');
+            resHeaders.delete('Content-Length');
+
+            // Determine if rewriting is requested
+            const shouldRewrite = url.searchParams.get('rewrite') === 'true' || request.headers.get('X-Rewrite-HTML') === 'true';
+
             // Handle manual redirects
             if ([301, 302, 303, 307, 308].includes(response.status)) {
                 const location = resHeaders.get('Location');
                 if (location) {
                     try {
                         const absoluteLocation = new URL(location, targetUrl.origin).toString();
-                        const rewrittenLocation = `${url.origin}/?target=${encodeURIComponent(absoluteLocation)}`;
-                        resHeaders.set('Location', rewrittenLocation);
+                        if (shouldRewrite) {
+                            const rewrittenLocation = `${url.origin}/?target=${encodeURIComponent(absoluteLocation)}&rewrite=true`;
+                            resHeaders.set('Location', rewrittenLocation);
+                        } else {
+                            resHeaders.set('Location', absoluteLocation);
+                        }
                     } catch (e) { }
                 }
             }
 
             const contentType = resHeaders.get('Content-Type') || '';
 
-            // 6. Dynamic HTML Rewriting
-            if (contentType.includes('text/html')) {
+            // 6. Dynamic HTML Rewriting (optional, enabled via 'rewrite' query param or 'X-Rewrite-HTML' header)
+            if (shouldRewrite && contentType.includes('text/html')) {
                 const rewriter = new HTMLRewriter()
                     .on('a', new AttributeRewriter('href', url.origin, targetUrl.origin))
                     .on('img', new AttributeRewriter('src', url.origin, targetUrl.origin))
@@ -157,7 +201,7 @@ export default {
             });
 
         } catch (e) {
-            return new Response('Internal Server Error', { status: 500 });
+            return errorResponse(`Internal Server Error: ${e.message}`, 500);
         }
     }
 };
@@ -178,7 +222,7 @@ class AttributeRewriter {
         if (attribute) {
             try {
                 const absoluteUrl = new URL(attribute, this.targetOrigin).toString();
-                const rewrittenUrl = `${this.proxyOrigin}/?target=${encodeURIComponent(absoluteUrl)}`;
+                const rewrittenUrl = `${this.proxyOrigin}/?target=${encodeURIComponent(absoluteUrl)}&rewrite=true`;
                 element.setAttribute(this.attributeName, rewrittenUrl);
             } catch (e) { }
         }
